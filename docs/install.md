@@ -1,12 +1,14 @@
 # Set up an environment for StreamOcc
 
 ### Set up a new virtual environment
+
 ```bash
 conda create -n streamocc python=3.8 -y
-conda activate streamocc 
+conda activate streamocc
 ```
 
 ### Install packages using pip3
+
 ```bash
 streamocc_path="path/to/StreamOcc"
 cd ${streamocc_path}
@@ -22,17 +24,17 @@ apt-get update && apt-get install -y ninja-build
 ```
 
 ### Compile the deformable_aggregation and others CUDA op
+
 ```bash
 cd projects/mmdet3d_plugin/ops
 python3 setup.py develop
-cd ../../../deform_attn_3d 
+cd ../../../deform_attn_3d
 python setup.py build_ext --inplace
 cd ../projects/mmdet3d_plugin/models/bev_pool_v2
 python setup.py build_ext --inplace
 cd ../../../..
 ```
 
-
-
 ---
+
 -> Next Page: [Prepare The Dataset](./prepare_data.md)

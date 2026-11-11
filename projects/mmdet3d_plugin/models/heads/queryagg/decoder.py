@@ -10,6 +10,7 @@ from projects.mmdet3d_plugin.core.box3d import *
 
 @BBOX_CODERS.register_module()
 class SparseBox3DDecoder(object):
+    # 检测推理后处理：选择高分预测并还原三维框编码；这里不是 Transformer 解码层。
     def __init__(
         self,
         num_output: int = 300,
@@ -22,6 +23,7 @@ class SparseBox3DDecoder(object):
         self.sorted = sorted
 
     def decode_box(self, box):
+        # 将 log 尺寸取 exp，将 sin/cos 朝向还原成 yaw，拼接中心和速度得到物理框参数。
         yaw = torch.atan2(box[:, SIN_YAW], box[:, COS_YAW])
         box = torch.cat(
             [
@@ -42,6 +44,8 @@ class SparseBox3DDecoder(object):
         qulity=None,
         output_idx=-1,
     ):
+        # 默认使用最后一轮预测：sigmoid 分类分数 → top-k → 可选质量重评分
+        # → 阈值过滤 → 框参数解码，返回每个样本的框、分数和类别。
         squeeze_cls = instance_id is not None
 
         cls_scores = cls_scores[output_idx].sigmoid()

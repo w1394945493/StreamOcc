@@ -9,6 +9,7 @@ from projects.mmdet3d_plugin.core.box3d import *
 
 @LOSSES.register_module()
 class SparseBox3DLoss(nn.Module):
+    # 组合检测回归损失：框参数 L1，加上可选的中心质量与朝向质量监督。
     def __init__(
         self,
         loss_box,
@@ -41,6 +42,8 @@ class SparseBox3DLoss(nn.Module):
     ):
         # Some categories do not distinguish between positive and negative
         # directions. For example, barrier in nuScenes dataset.
+        # 接收已匹配的预测和 GT，处理允许朝向反转的类别，再计算框与质量损失。
+        # 类别 FocalLoss 在 QueryAgg.loss 中单独调用，不在此处计算。
         if self.cls_allow_reverse is not None and cls_target is not None:
             if_reverse = (
                 torch.nn.functional.cosine_similarity(

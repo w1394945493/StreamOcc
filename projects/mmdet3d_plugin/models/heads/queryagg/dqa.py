@@ -60,6 +60,7 @@ def box3d_to_corners(box3d: torch.Tensor) -> torch.Tensor:
 
 @PLUGIN_LAYERS.register_module()
 class DQA(nn.Module):
+    # 论文 3.2 Dynamic Query Aggregation：将筛选后的目标 query 特征注入对应体素区域。
     """Dynamic Query Aggregation (DQA).
 
     - Takes query features (agent_feat) and voxel features (vox_feat)
@@ -89,6 +90,7 @@ class DQA(nn.Module):
         no_norm: bool = False,
         surround_occ: bool = False,
     ) -> None:
+        # 构建 query-to-voxel 注意力及可选占据预测头；网格范围用于目标位置到体素索引的映射。
         super(DQA, self).__init__()
 
         self.embed_dims = embed_dims
@@ -166,6 +168,9 @@ class DQA(nn.Module):
         metas=None,
         voxel_pos=None,
     ) -> torch.Tensor:
+        # 1. 根据目标框建立 query 到体素的联系并进行特征聚合。
+        # 2. 若启用占据头，对增强特征上采样并预测体素类别。
+        # 3. 返回增强体素、占据预测和上采样特征，交给外层继续处理。
         """Forward.
 
         Returns:
@@ -218,6 +223,8 @@ class DQA(nn.Module):
         B: int,
         vox_flatten_size: int,
     ) -> torch.Tensor:
+        # 构造目标 query 与对应体素之间的稀疏边；汇总各批次索引后执行图注意力。
+        # 边的源节点是实例 query，目标节点是体素，避免构造所有 query×体素的稠密连接。
         """Build query→voxel edges and run CrossAttentionLayer."""
         # Common constants as tensors (created only once per forward)
         vox_lower = torch.tensor(
@@ -405,6 +412,7 @@ class DQA(nn.Module):
 
 class CrossAttentionLayer(MessagePassing):
 
+    # 使用 PyG MessagePassing 实现 query-to-voxel 注意力，按目标体素汇总实例消息。
     def __init__(self,
                  embed_dim: int,
                  num_heads: int = 8,
@@ -448,6 +456,7 @@ class CrossAttentionLayer(MessagePassing):
                 edge_attr: OptTensor = None,
                 voxel_pos_embedding: OptTensor = None,
                 size: Size = None,) -> torch.Tensor:
+        # 将源实例特征聚合到目标体素，并通过残差连接和 FFN 更新目标特征。
         x_source,x_target = x
         if self.no_norm:
             x_target = x_target + self._mha_block(x_target,x_source, edge_index,edge_attr,voxel_pos_embedding, size)
@@ -464,6 +473,7 @@ class CrossAttentionLayer(MessagePassing):
                 index: torch.Tensor,
                 ptr: OptTensor,
                 size_i: Optional[int]) -> torch.Tensor:
+        # 对每条 query→体素边计算注意力；按目标体素分组 softmax，再加权实例 value。
         if vox_pos_embedding_i is not None:
             x_i = x_i + vox_pos_embedding_i
         query = self.lin_q_node(x_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
@@ -489,6 +499,7 @@ class CrossAttentionLayer(MessagePassing):
     def update(self,
                inputs: torch.Tensor,
                x: torch.Tensor) -> torch.Tensor:
+        # 将聚合消息投影为体素通道形状，并用体素/消息共同预测的门控控制注入量。
         x = x[1]
         inputs = inputs.view(-1, self.embed_dim)
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(x))
@@ -501,6 +512,7 @@ class CrossAttentionLayer(MessagePassing):
                    edge_attr: OptTensor,
                    vox_pos_embedding: OptTensor,
                    size: Size) -> torch.Tensor:
+        # 调用 propagate 完成逐边消息计算与按体素求和，再做输出投影。
         if vox_pos_embedding is not None:
             vox_pos_embedding = vox_pos_embedding.flatten(0,1)
         x = self.out_proj(self.propagate(edge_index=edge_index, x=(x_source,x_target), edge_attr=edge_attr,vox_pos_embedding=vox_pos_embedding,size=size))

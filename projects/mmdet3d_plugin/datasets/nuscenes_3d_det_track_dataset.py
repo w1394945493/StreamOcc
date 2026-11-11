@@ -32,22 +32,22 @@ import copy
 
 colors_map = np.array(
     [
-        [  0,   0,   0, 255],       # other                
-        [255, 120,  50, 255],       # barrier              
-        [255, 192, 203, 255],       # bicycle              
-        [255, 255,   0, 255],       # bus                  
-        [  0, 150, 245, 255],       # car                  
-        [  0, 255, 255, 255],       # construction_vehicle 
-        [200, 180,   0, 255],       # motorcycle           
-        [255,   0,   0, 255],       # pedestrian           
-        [255, 140, 150, 255],       # traffic_cone         
-        [135,  60,   0, 255],       # trailer              
-        [160,  32, 240, 255],       # truck                
-        [255,   0, 255, 255],       # driveable_surface     
-        [139, 137, 137, 255],       # other_flat            
-        [ 75,   0,  75, 255],       # sidewalk             
-        [150, 240,  80, 255],       # terrain                        
-        [222, 184, 135, 255],       # manmade              
+        [  0,   0,   0, 255],       # other
+        [255, 120,  50, 255],       # barrier
+        [255, 192, 203, 255],       # bicycle
+        [255, 255,   0, 255],       # bus
+        [  0, 150, 245, 255],       # car
+        [  0, 255, 255, 255],       # construction_vehicle
+        [200, 180,   0, 255],       # motorcycle
+        [255,   0,   0, 255],       # pedestrian
+        [255, 140, 150, 255],       # traffic_cone
+        [135,  60,   0, 255],       # trailer
+        [160,  32, 240, 255],       # truck
+        [255,   0, 255, 255],       # driveable_surface
+        [139, 137, 137, 255],       # other_flat
+        [ 75,   0,  75, 255],       # sidewalk
+        [150, 240,  80, 255],       # terrain
+        [222, 184, 135, 255],       # manmade
         [  0, 175,   0, 255],       # vegetation
         [255, 255, 255, 0],         # empty
     ])
@@ -90,7 +90,7 @@ class NuScenes3DDetTrackDataset(Dataset):
     occ_classes = ['barrier','bicycle', 'bus', 'car', 'construction_vehicle', 'motorcycle',
                 'pedestrian', 'traffic_cone', 'trailer', 'truck', 'driveable_surface',
                 'other_flat', 'sidewalk', 'terrain', 'manmade','vegetation']
-    
+
     ID_COLOR_MAP = [
         (245, 150, 0), # car
         (240, 32, 160), # truck
@@ -158,7 +158,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         else:
             self.occ_classes = occ_classes
         self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
-        self.data_infos = self.load_annotations(self.ann_file)
+        self.data_infos = self.load_annotations(self.ann_file) #* 数据集按时间顺序排序
 
         if pipeline is not None:
             self.pipeline = Compose(pipeline)
@@ -185,6 +185,8 @@ class NuScenes3DDetTrackDataset(Dataset):
         self.keep_consistent_seq_aug = keep_consistent_seq_aug
         self.current_aug = None
         self.last_id = None
+        #*---------------------------------------------------------#
+        #* 实际的分组实现：根据序列边界建立组号，再按 sequences_split_num 切分。
         if with_seq_flag:
             self._set_sequence_group_flag()
 
@@ -195,59 +197,83 @@ class NuScenes3DDetTrackDataset(Dataset):
         """
         Set each sequence to be a different group
         """
+        # 目的：为每个样本生成组号 flag[i]，供 GroupInBatchSampler 查找该组的帧索引。
+        # 本函数只分组，不读取图像、不缓存历史特征，也不重新排列 data_infos。
+        # load_annotations 已按 timestamp 排序；本函数按这个排序后的索引顺序处理。
+        # 注意：时间有序不等于场景归属正确，下面仍依赖 sweeps 判断边界。
+        #
+        # 第一阶段：按序列边界生成连续组号，如 [0,0,0,1,1,1,1]。
         res = []
 
+        # 第一帧直接属于组 0，之后每遇到新序列边界就递增组号。
         curr_sequence = 0
         for idx in range(len(self.data_infos)):
+            #* sweeps：沿当前lidar帧的prev指针，向前寻找历史扫描得到的列表。
+            #* 首帧通常无历史扫描
+            # sweeps 是该关键帧可用的历史 LiDAR 扫描信息；序列首帧通常没有历史。
+            # 此处以“非数据集首帧且 sweeps 为空”作为新序列标记，并未比较 scene_token。
+            # 前提是数据保留了序列首帧，且 sweeps 信息正常；若首帧被过滤或
+            # 生成 pkl 时 max_sweeps=0，这个判断可能漏分组或把每帧都分成一组。
             if idx != 0 and len(self.data_infos[idx]["sweeps"]) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
                 curr_sequence += 1
-            res.append(curr_sequence)
+            # res 的位置与 data_infos 一一对应：res[idx] 就是当前帧的组号。
+            res.append(curr_sequence) #* 记录每帧所属组号，从0开始
 
+        # 例如 flag=[0,0,0,1,1]，np.where(flag==1)[0] 就得到帧索引 [3,4]。
         self.flag = np.array(res, dtype=np.int64)
+        # 第二阶段：可选地把原序列拆成更短、连续的子序列，各子序列成为独立采样组。
+        # sequences_split_num=1：不切分，保留第一阶段的 flag。
         if self.sequences_split_num != 1:
+            # "all"：每帧单独成组，flag=[0,1,2,...]，不再提供组内连续帧。
             if self.sequences_split_num == "all":
                 self.flag = np.array(
                     range(len(self.data_infos)), dtype=np.int64
                 )
             else:
-                bin_counts = np.bincount(self.flag)
+                # 整数 K：尝试将每个原序列切为 K 个连续子段。
+                # bincount 得到每个原组的帧数，例如 [6,4] 表示两组分别有 6 帧、4 帧。
+                bin_counts = np.bincount(self.flag) #* 统计每个原组的帧数
                 new_flags = []
+                # 新组号跨所有原序列连续累加，不能在每个原序列开始时重置。
                 curr_new_flag = 0
                 for curr_flag in range(len(bin_counts)):
-                    curr_sequence_length = np.array(
-                        list(
-                            range(
-                                0,
-                                bin_counts[curr_flag],
-                                math.ceil(
-                                    bin_counts[curr_flag]
-                                    / self.sequences_split_num
-                                ),
-                            )
-                        )
-                        + [bin_counts[curr_flag]]
-                    )
-
-                    for sub_seq_idx in (
-                        curr_sequence_length[1:] - curr_sequence_length[:-1]
-                    ):
+                    # ---------------------------------------------------------------------------
+                    # 这行代码是在计算当前序列从哪些位置切开：bin_counts[curr_flag] 是当前序列的总帧数，
+                    # 先用 ceil(总帧数 / 切分段数) 算出每段的步长，再用 range 从位置 0 开始按步长列出切分位置，
+                    # 最后补上总帧数作为结束边界。例如有 5 帧、切成 2 段，步长为 ceil(5/2)=3，range(0,5,3) 得到 [0,3]，
+                    # 补上末尾 5 后得到 [0,3,5]，表示第一段取位置 0、1、2，第二段取位置 3、4。所以这个变量保存的是切分边界，不是帧数，也不是帧数据。
+                    # ---------------------------------------------------------------------------
+                    # 这里变量名虽叫 length，保存的实际是切分边界，而非各段长度。
+                    # 例：6 帧、K=2，步长 ceil(6/2)=3，边界为 [0,3,6]；
+                    #     5 帧、K=2，边界为 [0,3,5]，最后一段可以更短。
+                    curr_sequence_length = np.array(list(range(0, bin_counts[curr_flag],
+                                                               math.ceil(bin_counts[curr_flag] / self.sequences_split_num),)) + [bin_counts[curr_flag]]) # 生成切分边界
+                    #* 相邻边界相减，得到各段帧数
+                    # 相邻边界作差得到子段帧数，如 [0,3,5] → [3,2]。
+                    # sub_seq_idx 实际是当前子段长度，不是该子段的编号。
+                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+                        # 给这段的每一帧写入相同的新组号，再为下一段递增组号。
+                        # 例：原 flag=[0,0,0,0,0]，K=2 → 新 flag=[0,0,0,1,1]。
+                        # 按原组顺序追加依赖于第一阶段每组在 data_infos 中连续排列。
                         for _ in range(sub_seq_idx):
-                            new_flags.append(curr_new_flag)
+                            new_flags.append(curr_new_flag) # 写入每一帧所属新的组号
                         curr_new_flag += 1
 
+                # 校验：切分不能增减样本，并要求最终组数恰好等于“原组数 × K”。
+                # ceil 步长对过短序列等情况不一定能产生 K 段，此时下方断言会失败；
+                # 当前实现不会自动补帧或降低 K。
                 assert len(new_flags) == len(self.flag)
-                assert (
-                    len(np.bincount(new_flags))
-                    == len(np.bincount(self.flag)) * self.sequences_split_num
-                )
-                self.flag = np.array(new_flags, dtype=np.int64)
+                assert (len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num)
+                # -----------------------------------------------------------#
+                # 用子序列组号覆盖原组号；之后 sampler 按这些新组独立、顺序取帧。
+                self.flag = np.array(new_flags, dtype=np.int64) # dataset.flag: 数据集建立的一个数组：数组位置表示样本索引，数组值表示该样本所属的组号
 
 
     def get_augmentation_3d(self):
         if self.data_aug_conf is None:
             return None
-       
+
         if not self.test_mode:
             rotate_3d = np.random.uniform(*self.data_aug_conf["rot3d_range"])
             if self.data_aug_conf["bda_aug"] is not None:
@@ -266,7 +292,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             scale_bda = 1.0
             flip_dx = False
             flip_dy = False
-            
+
         aug_config = {
             "rotate_3d": rotate_3d,
             "rotate_bda" : rotate_bda,
@@ -331,9 +357,9 @@ class NuScenes3DDetTrackDataset(Dataset):
             aug_config_2d = [self.get_augmentation_2d()] * self.num_cams
         aug_config_3d = self.get_augmentation_3d()
         aug_config = {"2d": aug_config_2d, "3d": aug_config_3d}
-        
+
         return aug_config
-        
+
     def __getitem__(self, idx):
         while True:
             if isinstance(idx, dict):
@@ -376,10 +402,10 @@ class NuScenes3DDetTrackDataset(Dataset):
             if name in self.CLASSES:
                 cat_ids.append(self.cat2id[name])
         return cat_ids
-
+    #* 数据集按时间排序：保证group_in_batch_sampler中np.where() 得到的升序索引，是建立在数据已经按时间排序的基础上的。
     def load_annotations(self, ann_file):
         data = mmcv.load(ann_file, file_format="pkl")
-        data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
+        data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"])) #* 得到重新排列，按时间顺序的列表
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data["metadata"]
         self.version = self.metadata["version"]
@@ -463,8 +489,8 @@ class NuScenes3DDetTrackDataset(Dataset):
                 # camego2global = camego2global_rot.new_zeros((4, 4))
                 # camego2global[:3, :3] = camego2global_rot
                 # camego2global[:3, -1] = camego2global_tran
-                
-                
+
+
                 cam2coors.append(sensor2ego.clone())
                 # sensor2egos.append(sensor2ego)
                 # print("sensor2ego",sensor2ego)
@@ -472,10 +498,10 @@ class NuScenes3DDetTrackDataset(Dataset):
                 # print("sensor2ego.shape",sensor2ego.shape)
                 # print("viewpad.shape",viewpad.shape)
                 ego2sensors.append(viewpad @ np.array(torch.inverse(sensor2ego)))
-                # camego2globals.append(camego2global) 
+                # camego2globals.append(camego2global)
 
 
-                
+
             input_dict.update(
                 dict(
                     img_filename=image_paths,
@@ -486,7 +512,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     cam2lidar=np.float32(np.stack(cam2lidars)),
                     # sensor2ego=sensor2egos,
                     # camego2global=camego2globals,
-                    
+
                 )
             )
 
@@ -498,7 +524,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         #     img2lidar_rots = []
         #     img2lidar_trans = []
         #     img2lidars = []
-        #     for cam_type, cam_info in info["cams"].items():     
+        #     for cam_type, cam_info in info["cams"].items():
         #         image_paths.append(cam_info["data_path"])
         #         # obtain lidar to image transformation matrix
         #         img2lidar_rots.append(copy.deepcopy(cam_info["sensor2lidar_rotation"]))
@@ -536,8 +562,8 @@ class NuScenes3DDetTrackDataset(Dataset):
         annos = self.get_ann_info(index)
         input_dict.update(annos)
         return input_dict
-    
-    
+
+
     def get_ann_info(self, index):
         info = self.data_infos[index]
         if self.use_valid_flag:
@@ -577,7 +603,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             if "instance_inds" in info:
                 instance_inds = np.array(info["instance_inds"], dtype=np.int)[mask]
                 anns_results["instance_inds"] = instance_inds
-                
+
         return anns_results
 
     def _format_bbox(self, results, jsonfile_prefix=None, tracking=False):
@@ -807,13 +833,13 @@ class NuScenes3DDetTrackDataset(Dataset):
         gt_occ = []
         if len(results[0].keys()) != 0:
             if 'surround_results' in results[0]:
-                result_surround = [result['surround_results'] for result in results] 
+                result_surround = [result['surround_results'] for result in results]
             if 'occ_results' in results[0]:
-                result_occ = [result['occ_results'] for result in results] 
+                result_occ = [result['occ_results'] for result in results]
                 if not self.valid_for_detection:
                     bbox_task = False
             if 'boxes' in results[0] and bbox_task:
-                results =  [result['boxes'] for result in results] 
+                results =  [result['boxes'] for result in results]
                 # results = [item for sublist in results for item in sublist]
             else:
                 bbox_task = False
@@ -860,14 +886,14 @@ class NuScenes3DDetTrackDataset(Dataset):
                     mask_camera = occ_gt['mask_camera'].astype(bool)
                 # occ_pred = occ_pred
                 self.occ_eval_metrics.add_batch(occ_pred, gt_semantics, mask_lidar, mask_camera)
-                
+
                 occ_dict['voxel_semantics_preds'] = occ_pred
                 occ_dict['voxel_semantics'] = gt_semantics
                 occ_dict['mask_lidar'] = mask_lidar
                 occ_dict['mask_camera'] = mask_camera
                 occ_dict['path'] = info['occ_path']
                 save_occ.append(occ_dict)
-                
+
                 # if self.save_results == 'all' or  self.save_results == 'occ':
                 #     path = info['occ_path'].split('/')
                 #     path ='./pred/' + path[-2] + '/' + path[-1]
@@ -879,14 +905,14 @@ class NuScenes3DDetTrackDataset(Dataset):
                 #     pred_vis = self.vis_occ(occ_pred)
                 #     mmcv.imwrite(np.concatenate([gt_vis, pred_vis], axis=1),
                 #                 os.path.join(show_dir + "%d.jpg"%index))
-                    
-            
+
+
             dict_iou = self.occ_eval_metrics.count_miou()
             results_dict.update(dict_iou)
             if self.save_results == 'all' or  self.save_results == 'occ':
                 with open('occ_results.pkl', 'wb') as f:
                     pickle.dump(save_occ, f)
-                
+
         if result_surround is not None:
             if self.use_semantic:
                 class_names = {0: 'IoU'}
@@ -905,7 +931,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     print("class: {}, iou: {}".format(class_names[i], tp / union))
                 for i in range(class_num):
                     results_dict[class_names[i]] = mean_ious[i]
-                    
+
                 results_dict['mIoU'] = np.mean(np.array(mean_ious)[1:])
                 print("mIoU: {}".format(results_dict['mIoU']))
             else:
@@ -951,9 +977,9 @@ class NuScenes3DDetTrackDataset(Dataset):
         #     num_workers=8
         # )
         # lidar_origins = [batch[1] for i,batch in enumerate(data_loader)]
-        
+
         # results_dict.update(calc_rayiou(result_occ, gt_occ, lidar_origins))
-            
+
         return results_dict
 
     def show(self, results, save_dir=None, show=False, pipeline=None):

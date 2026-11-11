@@ -23,6 +23,7 @@ def topk(confidence, k, *inputs):
 
 @PLUGIN_LAYERS.register_module()
 class InstanceBank(nn.Module):
+    # 实例记忆库：管理初始 anchor/query、历史高置信度实例，以及供 StreamAgg 使用的体素缓存。
     def __init__(
         self,
         num_anchor,
@@ -36,6 +37,7 @@ class InstanceBank(nn.Module):
         feat_grad=True,
         max_time_interval=2,
     ):
+        # 加载初始 anchor，并创建实例特征参数；feat_grad 仅控制这份初始特征是否可学习。
         super(InstanceBank, self).__init__()
         self.embed_dims = embed_dims
         self.num_temp_instances = num_temp_instances
@@ -72,6 +74,7 @@ class InstanceBank(nn.Module):
             torch.nn.init.xavier_uniform_(self.instance_feature.data, gain=1)
 
     def reset(self):
+        # 清空实例特征、框、置信度和元信息等时序状态。
         self.cached_feature = None
         self.cached_anchor = None
         self.metas = None
@@ -82,9 +85,12 @@ class InstanceBank(nn.Module):
         self.prev_id = 0
         
     def reset_vox_feature(self):
+        # 清空稠密体素缓存；体素记忆和实例记忆在此类中共同管理。
         self.cached_vox_feature = None
 
     def get(self, batch_size, metas=None, dn_metas=None):
+        # 取出本帧初始实例及历史实例；依据时间间隔和自车位姿传播历史框。
+        # 批次大小或时间有效性不满足时，不沿用对应的历史实例。
         instance_feature = torch.tile(
             self.instance_feature[None], (batch_size, 1, 1)
         )
@@ -159,6 +165,7 @@ class InstanceBank(nn.Module):
         )
 
     def update(self, instance_feature, anchor, confidence):
+        # 在当前帧初步解码后，保留历史实例，并从当前候选中补足剩余名额。
         if self.cached_feature is None:
             return instance_feature, anchor
 
@@ -208,6 +215,7 @@ class InstanceBank(nn.Module):
         metas=None,
         feature_maps=None,
     ):
+        # 为下一帧缓存高置信度实例；先 detach 截断跨帧梯度，再结合置信度衰减选择 top-k。
         if self.num_temp_instances <= 0:
             return
         instance_feature = instance_feature.detach()
@@ -229,6 +237,7 @@ class InstanceBank(nn.Module):
         ) = topk(confidence, self.num_temp_instances, instance_feature, anchor)
 
     def get_instance_id(self, confidence, anchor=None, threshold=None):
+        # 给尚无编号且满足条件的实例分配新 ID，用于跨帧关联。
         confidence = confidence.max(dim=-1).values.sigmoid()
         instance_id = confidence.new_full(confidence.shape, -1).long()
 
@@ -249,6 +258,7 @@ class InstanceBank(nn.Module):
         return instance_id
 
     def update_instance_id(self, instance_id=None, confidence=None):
+        # 使实例 ID 的排列与缓存 top-k 实例保持对应。
         if self.temp_confidence is None:
             if confidence.dim() == 3:  # bs, num_anchor, num_cls
                 temp_conf = confidence.max(dim=-1).values

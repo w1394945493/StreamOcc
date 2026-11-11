@@ -33,13 +33,13 @@ class StreamOccHead(nn.Module):
         use_occ_loss: bool = True,
     ):
         super().__init__()
-        
+
         # Build queryagg and streamagg
         self.queryagg = build_head(queryagg) if isinstance(queryagg, dict) else queryagg
-        
+
         # Build streamagg (config should already include voxel_encoder_backbone, voxel_encoder_neck, img_view_transformer, surround_occ, grid_config)
         self.streamagg = build_from_cfg(streamagg, PLUGIN_LAYERS) if isinstance(streamagg, dict) else streamagg
-        
+
         if group_split is not None:
             self.group_split = torch.tensor(group_split, dtype=torch.uint8)
 
@@ -93,6 +93,7 @@ class StreamOccHead(nn.Module):
         model_outs, voxel_feature, up_vox_occ = self.queryagg(
             feature_maps=feature_maps, voxel_feature=voxel_feature, metas=data, occ_pos=occ_pos
         )
+        # 训练时，将 QueryAgg 增强后的体素特征写入缓存：
         instance_bank.cached_vox_feature = voxel_feature.permute(0, 1, 4, 2, 3)
         if "vox_occ" in model_outs:
             vox_occ_list = (vox_occ_list or []) + model_outs["vox_occ"]
@@ -149,7 +150,7 @@ class StreamOccHead(nn.Module):
         """
         Forward function for the mask decoder head during training.
         Args:
-            voxel_feats (torch.Tensor): [B, C, H, W, Z] 
+            voxel_feats (torch.Tensor): [B, C, H, W, Z]
             data (dict): training data dict
             up_vox_occ: upsampled or processed voxel occupancy from the detection head
             origin_feature_maps: original feature maps for mask decoder
@@ -176,7 +177,7 @@ class StreamOccHead(nn.Module):
         loss_inputs = [voxel_semantics, gt_classes, sem_mask,
                        mask_camera, mask_lidar, outs]
         losses = self.mask_decoder_head.loss(*loss_inputs)
-        
+
         return losses,outs['occ_outs']
 
     def build_occ_pos(self, voxel_size, batch_size, device, dtype):
@@ -267,6 +268,7 @@ class StreamOccHead(nn.Module):
         model_outs, voxel_feature, up_vox_occ = self.queryagg(
             feature_maps=feature_maps, voxel_feature=voxel_feature, metas=data, occ_pos=occ_pos
         )
+        # 缓存历史特征
         instance_bank.cached_vox_feature = voxel_feature.permute(0, 1, 4, 2, 3)
 
         if "vox_occ" in model_outs:
@@ -388,7 +390,7 @@ class StreamOccHead(nn.Module):
                 gt_class, sem_mask = self.generate_mask(voxel_semantic)
                 gt_classes.append(gt_class.to(voxel_semantic.device))
                 sem_masks.append(sem_mask.to(voxel_semantic.device))
-            
+
             group_classes.append(gt_classes)
             group_masks.append(sem_masks)
 

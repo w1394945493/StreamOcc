@@ -27,6 +27,7 @@ __all__ = ["QueryAgg"]
 
 @HEADS.register_module()
 class QueryAgg(BaseModule):
+    # 检测与占据交互的总控模块：维护稀疏实例 query，逐轮预测三维框，再通过 DQA 增强体素。
     def __init__(
         self,
         instance_bank: dict,
@@ -66,6 +67,8 @@ class QueryAgg(BaseModule):
         use_filter: bool = False,
         **kwargs,
     ):
+        # 根据配置构建实例库、几何编码、注意力、框预测、目标匹配与损失。
+        # operation_order 决定这些子模块的实际执行顺序。
         super(QueryAgg, self).__init__(init_cfg)
         self.use_nms_filter = use_nms_filter
         self.num_img_decoder = num_img_decoder
@@ -106,7 +109,7 @@ class QueryAgg(BaseModule):
             if cfg is None:
                 return None
             return build_from_cfg(cfg, registry)
-     
+
         self.instance_bank = build(instance_bank, PLUGIN_LAYERS)
         self.embed_dims = self.instance_bank.embed_dims
         self.num_temp_instances = self.instance_bank.num_temp_instances
@@ -114,7 +117,7 @@ class QueryAgg(BaseModule):
         self.sampler = build(sampler, BBOX_SAMPLERS)
         self.decoder = build(decoder, BBOX_CODERS)
         self.loss_cls = build(loss_cls, LOSSES)
-        self.loss_reg = build(loss_reg, LOSSES)        
+        self.loss_reg = build(loss_reg, LOSSES)
         self.op_config_map = {
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
@@ -183,6 +186,7 @@ class QueryAgg(BaseModule):
         key_pos=None,
         **kwargs,
     ):
+        # 统一调用实例注意力；解耦模式将内容与几何编码拼接，完成注意力后映射回原通道数。
         if self.decouple_attn:
             query = torch.cat([query, query_pos], dim=-1)
             if key is not None:
@@ -211,6 +215,9 @@ class QueryAgg(BaseModule):
         occ_pos: torch.Tensor = None,
         ref_3d: torch.Tensor = None,
     ):
+        # 前向主流程：读取当前/历史实例 → 训练时追加去噪 query → 多轮特征更新与框细化
+        # → DQA 注入目标特征 → 整理逐层预测并缓存实例。
+        # instance_feature 是目标内容特征；anchor 是框几何参数；voxel_feature 是稠密场景特征。
         up_vox_occ = None
         voxel_pos = None
         voxel_feature_occ = None
@@ -223,7 +230,7 @@ class QueryAgg(BaseModule):
             batch_size = feature_maps[0].shape[0]
         else:
             batch_size = feature_maps.shape[2]
-        # ========= get instance info ============
+        # 阶段一：读取初始/历史实例；训练时准备去噪信息和注意力掩码。
         if (
             self.sampler.dn_metas is not None
             and self.sampler.dn_metas["dn_anchor"].shape[0] != batch_size
@@ -320,13 +327,14 @@ class QueryAgg(BaseModule):
         else:
             temp_anchor_embed = None
 
-        # =================== forward the layers ====================
+        # 阶段二：按配置逐轮执行检测解码，保留每轮框、类别与质量预测用于监督。
         prediction = []
         classification = []
         quality = []
         anchors = []
-        vox_occ_list = [] 
+        vox_occ_list = []
         for i, op in enumerate(self.operation_order):
+            # 时序交互：当前实例读取历史实例特征。
             if op == "temp_gnn":
                 instance_feature = self.graph_model(
                     i,
@@ -339,6 +347,7 @@ class QueryAgg(BaseModule):
                     if temp_instance_feature is None
                     else None,
                 )
+            # 实例间交互：当前候选之间做自注意力。
             elif op == "gnn":
                 instance_feature = self.graph_model(
                     i,
@@ -349,6 +358,8 @@ class QueryAgg(BaseModule):
                 )
             elif op == "norm" or op == "ffn" or op == "ffn_vox":
                 instance_feature = self.layers[i](instance_feature)
+            # 占据交互：训练时结合 GT 几何关系筛选，推理时按置信度筛选，
+            # 再把目标 query 特征注入相应体素。use_nms_filter 名称不代表此处是标准 NMS。
             elif op == "dqa":
                 cls_index = []
                 all_filter_flag = [False] * instance_feature.shape[0]
@@ -357,7 +368,7 @@ class QueryAgg(BaseModule):
                         reg = prediction[-1].clone().detach()[:,:num_free_instance][..., : len(self.reg_weights)]
                         cls = classification[-1].clone().detach()[:,:num_free_instance]
                         cls_mask = cls.max(-1)[0].sigmoid()>self.nms_thr
-                        
+
                         box_cost= self.sampler.sample(
                             cls.clone(),
                             reg.clone(),
@@ -368,7 +379,7 @@ class QueryAgg(BaseModule):
                         cost_matrix = self.get_cost_mat(cls,reg, metas[self.gt_cls_key],metas[self.gt_reg_key],return_cost_matrix=True) # [pred_ind,gt_ind]
                         for j in range(len(cost_matrix)):
                             indices_mask = torch.where(torch.logical_or(box_cost[j][cls_mask[j]].min(-1)[0] < 1.5,cost_matrix[j][:,cls_mask[j]].max(0)[0]>0.3))[0]
-                            
+
                             if indices_mask.shape[0] == 0:
                                 all_filter_flag[j] = True
                                 indices = torch.tensor([0],device=voxel_feature.device)
@@ -403,7 +414,8 @@ class QueryAgg(BaseModule):
                 voxel_feature_occ = voxel_feature.permute(0,4,1,2,3) # [B,H,W,D,C] -> [B,C,H,W,D]
                 if vox_occ is not None:
                     vox_occ_list.append(vox_occ)
-         
+
+            # 外部证据聚合：分别从图像/体素采样，增强当前 query。
             elif op == "deformable" or op == "deformable_vox":
                 instance_feature = self.layers[i](
                     instance_feature,
@@ -416,6 +428,7 @@ class QueryAgg(BaseModule):
                     spatial_shapes = spatial_shapes,
                     level_start_index = level_start_index,
                 )
+            # 框预测：输出本轮更新后的 anchor、类别 logits 和质量分数。
             elif op == "refine":
                 anchors.append(anchor)
                 anchor, cls, qt = self.layers[i](
@@ -428,7 +441,7 @@ class QueryAgg(BaseModule):
                 classification.append(cls)
                 quality.append(qt)
                 self.prediction_length += 1
-                
+
                 if self.prediction_length == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
                         instance_feature, anchor, cls
@@ -455,14 +468,14 @@ class QueryAgg(BaseModule):
                             self.instance_bank.num_anchor,
                             self.instance_bank.mask,
                         )
-         
+
                 if self.operation_order[-1] == "dqa":
                     if i != len(self.operation_order) - 2:
                         anchor_embed = self.anchor_encoder(anchor)
                 else:
                     if i != len(self.operation_order) - 1:
                         anchor_embed = self.anchor_encoder(anchor)
-                        
+
                 if (self.prediction_length > self.num_single_frame_decoder
                     and temp_anchor_embed is not None
                 ):
@@ -478,7 +491,7 @@ class QueryAgg(BaseModule):
             output.update({"vox_occ": vox_occ_list})
 
         if dn_metas is not None:
-        
+
             dn_classification = [
                 x[:, num_free_instance:] for x in classification
             ]
@@ -489,7 +502,7 @@ class QueryAgg(BaseModule):
                 x[:, :num_free_instance] if x is not None else None
                 for x in quality
             ]
-         
+
             output.update(
                 {
                     "dn_prediction": dn_prediction,
@@ -530,30 +543,28 @@ class QueryAgg(BaseModule):
                 "prediction": prediction,
                 "quality": quality,
             }
-        )    
-  
-
-
-        self.instance_bank.cache(
-            instance_feature, anchor, cls, metas, feature_maps
         )
+
+        # 阶段三：缓存常规检测实例，为下一帧保留目标级记忆。
+        self.instance_bank.cache(instance_feature, anchor, cls, metas, feature_maps)
 
         self.prediction_length = 0
         if voxel_feature_occ == None:
             voxel_feature_occ = voxel_feature.permute(0,4,1,2,3) # [B,C,H,W,D]
-        
+
         output['instance_feature'] = instance_feature
         return output , voxel_feature_occ, up_vox_occ
-    
 
-    
+
+
     @force_fp32(apply_to=("model_outs"))
     def loss(self, model_outs, data, feature_maps=None):
         # ===================== prediction losses ======================
+        # 训练入口：逐解码层匹配 GT，计算分类、框回归与质量损失；另外监督去噪 query。
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
-        output = {}      
+        output = {}
         o2o_indices_list = []
         for decoder_idx, (cls, reg, qt) in enumerate(
             zip(cls_scores, reg_preds, quality)):
@@ -601,11 +612,11 @@ class QueryAgg(BaseModule):
 
             output[f"loss_cls_{decoder_idx}"] = cls_loss
             output.update(reg_loss)
-       
-                    
+
+
         if "dn_prediction" not in model_outs:
             return output
-        
+
 
         # ===================== denoising losses ======================
         dn_cls_scores = model_outs["dn_classification"]
@@ -640,7 +651,7 @@ class QueryAgg(BaseModule):
                 dn_cls_target,
                 avg_factor=num_dn_pos,
             )
-        
+
             reg_loss = self.loss_reg(
                 reg.flatten(end_dim=1)[dn_valid_mask][dn_pos_mask][
                     ..., : len(self.reg_weights)
@@ -682,6 +693,7 @@ class QueryAgg(BaseModule):
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(self, model_outs, output_idx=-1):
+        # 推理入口：调用检测 decoder，将网络内部框编码转换成可评估的框、类别和分数。
         return self.decoder.decode(
             model_outs["classification"],
             model_outs["prediction"],

@@ -7,15 +7,7 @@
 import torch
 from torch.cuda.amp import custom_bwd, custom_fwd
 from torch.autograd.function import Function, once_differentiable
-from mmcv.utils import ext_loader
-
-import sys
-
-sys.path.append("./deform_attn_3d/")
-
-
-
-import deform3dattn_custom_cn as ext_module
+from deform_attn_3d import deform3dattn_custom_cn as ext_module
 
 
 class MultiScaleDeformableAttn3DCustomFunction_fp16(Function):

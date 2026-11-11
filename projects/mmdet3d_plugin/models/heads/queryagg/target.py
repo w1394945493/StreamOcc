@@ -14,6 +14,7 @@ __all__ = ["SparseBox3DTarget"]
 
 @BBOX_SAMPLERS.register_module()
 class SparseBox3DTarget(BaseTargetWithDenoising):
+    # 检测监督目标生成器：常规实例使用匈牙利匹配，训练时另构造带扰动的 GT 去噪实例。
     def __init__(
         self,
         cls_weight=2.0,
@@ -71,6 +72,8 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         box_target,
         return_cost = False,
     ):
+        # 计算预测与 GT 的分类/框代价，完成一对一分配，生成类别、回归目标及权重。
+        # return_cost 分支供 DQA 筛选实例使用，不等同于常规训练目标输出。
         bs, num_pred, num_cls = cls_pred.shape
 
         cls_cost = self._cls_cost(cls_pred, cls_target)
@@ -163,6 +166,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         return cost
 
     def get_dn_anchors(self, cls_target, box_target, gt_instance_id=None):
+        # 由 GT 框加噪声生成去噪 anchor，组织正负样本、分组注意力掩码及监督目标。
         if self.num_dn_groups <= 0:
             return None
         if self.num_temp_dn_groups <= 0:
@@ -304,6 +308,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         num_noraml_anchor,
         temporal_valid_mask,
     ):
+        # 把历史去噪实例与当前去噪目标对齐，用实例 ID 建立跨帧对应关系。
         bs, num_anchor = instance_feature.shape[:2]
         if temporal_valid_mask is None:
             self.dn_metas = None
@@ -404,6 +409,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         valid_mask,
         dn_id_target,
     ):
+        # 缓存选定去噪组的特征、框和目标信息，供下一帧时序去噪训练使用。
         if self.num_temp_dn_groups < 0:
             return
         num_dn_groups = self.num_dn_groups

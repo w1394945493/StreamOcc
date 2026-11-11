@@ -1,9 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
+
+# Suppress warnings before importing third-party libraries (including workers).
+warnings.filterwarnings("ignore")
+
 import argparse
+import logging
 import mmcv
 import os
 import torch
-import warnings
 from mmcv import Config, DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (
@@ -23,12 +28,23 @@ from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.apis.test import custom_multi_gpu_test
 
 
+class _InitInfoFilter(logging.Filter):
+    def filter(self, record):
+        return not (
+            record.levelno == logging.INFO
+            and " - torch.Size(" in record.getMessage()
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="MMDet test (and eval) a model"
     )
     parser.add_argument("config", help="test config file path")
-    parser.add_argument("checkpoint", help="checkpoint file")
+    parser.add_argument(
+        "checkpoint", nargs="?", default=None,
+        help="optional checkpoint file; omit to use model initialization",
+    )
     parser.add_argument("--out", help="output result file in pickle format")
     parser.add_argument(
         "--fuse-conv-bn",
@@ -240,11 +256,24 @@ def main():
     cfg.model.train_cfg = None
     model = build_detector(cfg.model, test_cfg=cfg.get("test_cfg"))
 
+    if args.checkpoint is None:
+        # MMCV logs one initialization summary per parameter at INFO level.
+        logger = logging.getLogger("mmcv")
+        init_filter = _InitInfoFilter()
+        logger.addFilter(init_filter)
+        try:
+            model.init_weights()
+        finally:
+            logger.removeFilter(init_filter)
+        print("No checkpoint supplied; using model initialization.")
+
     # model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
+    checkpoint = {}
+    if args.checkpoint is not None:
+        checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is

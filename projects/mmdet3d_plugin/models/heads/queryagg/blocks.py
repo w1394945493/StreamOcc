@@ -47,6 +47,7 @@ def linear_relu_ln(embed_dims, in_loops, out_loops, input_dims=None):
 
 @ATTENTION.register_module()
 class DeformableFeatureAggregation(BaseModule):
+    # 特征聚合模块：以稀疏三维 anchor 为采样参考，从多视角图像或体素中获取信息。
     def __init__(
         self,
         embed_dims: int = 256,
@@ -65,6 +66,7 @@ class DeformableFeatureAggregation(BaseModule):
         surround_occ=False,
         residual_mode="add",
     ):
+        # 构建采样点生成器、注意力权重与输出映射；use_voxel_feature 决定是否走体素分支。
         super(DeformableFeatureAggregation, self).__init__()
         if embed_dims % num_groups != 0:
             raise ValueError(
@@ -155,6 +157,9 @@ class DeformableFeatureAggregation(BaseModule):
         level_start_index = None,
         **kwargs: dict,
     ):
+        # 1. 根据 anchor 和实例特征生成三维采样点。
+        # 2. 按开关从图像或体素采样并加权聚合，而不是遍历全部位置做全局注意力。
+        # 3. 输出映射后按 cat/add 残差方式更新实例特征。
         bs, num_anchor = instance_feature.shape[:2]
         key_points = self.kps_generator(anchor, instance_feature)
         if self.use_deformable_func:
@@ -301,6 +306,7 @@ class DeformableFeatureAggregation(BaseModule):
 
 @FEEDFORWARD_NETWORK.register_module()
 class AsymmetricFFN(BaseModule):
+    # 前馈网络：允许输入与输出通道不同，适配图像聚合后的拼接特征。
     def __init__(
         self,
         in_channels=None,
@@ -359,6 +365,7 @@ class AsymmetricFFN(BaseModule):
             )
 
     def forward(self, x, identity=None):
+        # 对 query 做逐位置非线性变换，并结合残差支路返回更新特征。
         if self.pre_norm is not None:
             x = self.pre_norm(x)
         out = self.layers(x)

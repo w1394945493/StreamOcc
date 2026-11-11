@@ -227,7 +227,7 @@ model = dict(
             ),
             instance_bank=dict(
                 type="InstanceBank",
-                num_anchor=900,
+                num_anchor=900, 
                 embed_dims=embed_dims,
                 anchor="nuscenes_kmeans900_42m.npy",
                 anchor_handler=dict(type="SparseBox3DKeyPointsGenerator"),

@@ -22,6 +22,7 @@ __all__ = [
 
 @POSITIONAL_ENCODING.register_module()
 class SparseBox3DEncoder(BaseModule):
+    # 几何编码器：分别编码中心、尺寸、朝向和速度，组合为 query 的位置特征。
     def __init__(
         self,
         embed_dims,
@@ -55,6 +56,7 @@ class SparseBox3DEncoder(BaseModule):
             self.output_fc = None
 
     def forward(self, box_3d: torch.Tensor):
+        # 将内部框参数分组送入编码网络，按配置拼接或相加，再做输出映射。
         pos_feat = self.pos_fc(box_3d[..., [X, Y, Z]])
         size_feat = self.size_fc(box_3d[..., [W, L, H]])
         yaw_feat = self.yaw_fc(box_3d[..., [SIN_YAW, COS_YAW]])
@@ -76,6 +78,7 @@ class SparseBox3DEncoder(BaseModule):
 
 @PLUGIN_LAYERS.register_module()
 class SparseBox3DRefinementModule(BaseModule):
+    # 检测预测头：从实例特征输出框参数更新、类别 logits 和可选的质量分数。
     def __init__(
         self,
         embed_dims=256,
@@ -128,6 +131,9 @@ class SparseBox3DRefinementModule(BaseModule):
         time_interval: torch.Tensor = 1.0,
         return_cls=True,
     ):
+        # 1. 将内容特征与几何编码结合，预测框参数，并对指定维度做残差更新。
+        # 2. 根据配置归一化朝向；利用时间间隔将位移更新转换为速度更新。
+        # 3. 由实例特征预测类别，并可选地预测 centerness/yawness 质量。
         feature = instance_feature + anchor_embed
         output = self.layers(feature)
         output[..., self.refine_state] = (
@@ -158,6 +164,7 @@ class SparseBox3DRefinementModule(BaseModule):
 
 @PLUGIN_LAYERS.register_module()
 class SparseBox3DKeyPointsGenerator(BaseModule):
+    # 围绕三维 anchor 生成固定/可学习采样点，也提供历史 anchor 的坐标传播。
     def __init__(
         self,
         embed_dims=256,
@@ -192,6 +199,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         cur_timestamp=None,
         temp_timestamps=None,
     ):
+        # 根据框的尺寸、旋转和中心，把局部固定点及可学习偏移变换为三维采样点。
         bs, num_anchor = anchor.shape[:2]
         size = anchor[..., None, [W, L, H]].exp()
         key_points = self.fix_scale * size
@@ -259,6 +267,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         dst_timestamps=None,
         time_intervals=None,
     ):
+        # 将历史框传播到目标时刻/坐标系：结合速度和时间差更新位置，再变换几何量。
         dst_anchors = []
         for i in range(len(T_src2dst_list)):
             vel = anchor[..., VX:]
