@@ -168,4 +168,5 @@ def collect_results_cpu(result_part, size, tmpdir=None):
 
 
 def collect_results_gpu(result_part, size):
-    collect_results_cpu(result_part, size)
+    # Keep the existing CPU fallback, but return its collected predictions.
+    return collect_results_cpu(result_part, size)

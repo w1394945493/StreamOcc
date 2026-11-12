@@ -2,12 +2,14 @@
 # modified from megvii-bevdepth.
 import math
 import os
+import io
 from copy import deepcopy
 
 import torch
 from mmcv.runner import load_state_dict
 from mmcv.runner.dist_utils import master_only
 from mmcv.runner.hooks import HOOKS, Hook
+from mmcv.runner.hooks import CheckpointHook
 
 from projects.mmdet3d_plugin.core.hook.utils import is_parallel
 
@@ -72,7 +74,8 @@ class MEGVIIEMAHook(Hook):
         self.init_updates = init_updates
         self.resume = resume
         self.decay = decay
-        self.split_iter = split_iter
+        # Keep accepting split_iter for old configs; checkpoint_config now owns
+        # the saving schedule for both the training weights and EMA weights.
         self.final_decay = final_decay
         self.decay_step = decay_step
         self.synch_main = synch_main
@@ -81,6 +84,10 @@ class MEGVIIEMAHook(Hook):
     def before_run(self, runner):
         from torch.nn.modules.batchnorm import SyncBatchNorm
 
+        self.checkpoint_hook = next(
+            (hook for hook in runner.hooks if isinstance(hook, CheckpointHook)),
+            None,
+        )
         bn_model_list = list()
         bn_model_dist_group_list = list()
         for model_ref in runner.model.modules():
@@ -110,25 +117,55 @@ class MEGVIIEMAHook(Hook):
 
     def after_train_iter(self, runner):
         runner.ema_model.update(runner, runner.model.module)
-        if ((runner.iter%self.split_iter) == 0) and runner.iter!=0:
-            self.save_checkpoint(runner)
+        hook = self.checkpoint_hook
+        # Match CheckpointHook's completed-step convention and final-step rule.
+        # Update EMA first so both files describe the same completed iteration.
+        if hook is not None and not hook.by_epoch:
+            if hook.every_n_iters(runner, hook.interval) or (
+                hook.save_last and hook.is_last_iter(runner)
+            ):
+                self.save_checkpoint(runner)
         if self.decay_step is not None:
             if runner.iter in self.decay_step:
                 self.decay = self.final_decay.pop(0)
                 runner.logger.info(f'EMA decay rate changed to {self.decay}')
             
-    def after_run(self, runner):
-        self.save_checkpoint(runner)
+    def after_train_epoch(self, runner):
+        hook = self.checkpoint_hook
+        if hook is not None and hook.by_epoch:
+            if hook.every_n_epochs(runner, hook.interval) or (
+                hook.save_last and hook.is_last_epoch(runner)
+            ):
+                self.save_checkpoint(runner)
 
     @master_only
     def save_checkpoint(self, runner):
+        hook = self.checkpoint_hook
+        # Reuse the ordinary checkpoint destination, naming template and retention
+        # policy. The suffix keeps EMA files separate from resumable checkpoints.
+        template = hook.args.get(
+            'filename_tmpl', 'epoch_{}.pth' if hook.by_epoch else 'iter_{}.pth'
+        )
+        stem, extension = os.path.splitext(template)
+        template = stem + '_ema' + extension
+        current = runner.epoch + 1 if hook.by_epoch else runner.iter + 1
         state_dict = runner.ema_model.ema.state_dict()
         ema_checkpoint = {
-            'iter': runner.iter,
+            # Epoch runners have already advanced iter before after_train_epoch.
+            'iter': runner.iter if hook.by_epoch else runner.iter + 1,
             'state_dict': state_dict,
             'updates': runner.ema_model.updates
         }
-        save_path = f'iter_{runner.iter}_ema.pth'
-        save_path = os.path.join(runner.work_dir, save_path)
-        torch.save(ema_checkpoint, save_path)
+        save_path = hook.file_client.join_path(hook.out_dir, template.format(current))
+        with io.BytesIO() as buffer:
+            torch.save(ema_checkpoint, buffer)
+            hook.file_client.put(buffer.getvalue(), save_path)
+        # Use the same interval-based cleanup as MMCV, touching only EMA files.
+        if hook.max_keep_ckpts > 0 and hook.interval > 0:
+            for step in range(current - hook.max_keep_ckpts * hook.interval,
+                              0, -hook.interval):
+                old_path = hook.file_client.join_path(hook.out_dir, template.format(step))
+                if not hook.file_client.isfile(old_path):
+                    break
+                hook.file_client.remove(old_path)
         runner.logger.info(f'Saving ema checkpoint at {save_path}')

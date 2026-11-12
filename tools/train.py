@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 import copy
+import logging
 import mmcv
 import time
 import torch
@@ -24,6 +25,27 @@ from datetime import timedelta
 import cv2
 
 cv2.setNumThreads(8)
+
+
+def configure_training_warning_filters():
+    # Silence known compatibility messages without hiding unrelated warnings.
+    messages = (
+        r"torch\.utils\.checkpoint: please pass in use_reentrant=",
+        r"torch\.range is deprecated and will be removed",
+        r"torch\.meshgrid: in an upcoming release, it will be required",
+        r"indexing with dtype torch\.uint8 is now deprecated",
+        r"To copy construct from a tensor, it is recommended to use",
+        r"Grad strides do not match bucket view strides\.",
+    )
+    for message in messages:
+        warnings.filterwarnings("ignore", message=message, category=UserWarning)
+
+
+class ReducerBucketLogFilter(logging.Filter):
+    def filter(self, record):
+        return record.getMessage() != (
+            "Reducer buckets have been rebuilt in this iteration."
+        )
 
 
 def parse_args():
@@ -113,6 +135,7 @@ def parse_args():
 
 
 def main():
+    configure_training_warning_filters()
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
@@ -228,6 +251,8 @@ def main():
     logger = get_root_logger(
         log_file=log_file, log_level=cfg.log_level
     )
+    for handler in logger.handlers:
+        handler.addFilter(ReducerBucketLogFilter())
 
     # init the meta dict to record some important information such as
     # environment info and seed, which will be logged

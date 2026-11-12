@@ -830,7 +830,6 @@ class NuScenes3DDetTrackDataset(Dataset):
         result_surround = None
         result_occ = None
         bbox_task = True
-        gt_occ = []
         if len(results[0].keys()) != 0:
             if 'surround_results' in results[0]:
                 result_surround = [result['surround_results'] for result in results]
@@ -857,9 +856,10 @@ class NuScenes3DDetTrackDataset(Dataset):
                     use_lidar_mask=False,
                     use_image_mask=True)
             save_occ = []
+            # Retain full voxel arrays only when prediction export is requested.
+            export_occ = self.save_results in ('all', 'occ')
             print('\nStarting Evaluation...')
             for index, occ_pred in enumerate(tqdm(result_occ)):
-                occ_dict = {}
                 info = self.data_infos[index]
                 if self.surround_occ:
                     occ_base_path = './data/nuscenes/nuscenes_occ/samples/'
@@ -879,20 +879,22 @@ class NuScenes3DDetTrackDataset(Dataset):
 
                     # occ_gt = occ_gt.astype(np.int32)
                 else:    # occ_gt = occ_gt[occ_gt > 0]
-                    occ_gt = np.load(os.path.join(info['occ_path'],'labels.npz'))
-                    gt_semantics = occ_gt['semantics']
-                    gt_occ.append(gt_semantics)
-                    mask_lidar = occ_gt['mask_lidar'].astype(bool)
-                    mask_camera = occ_gt['mask_camera'].astype(bool)
+                    # Close the archive each frame; metrics do not need old labels.
+                    with np.load(os.path.join(info['occ_path'], 'labels.npz')) as occ_gt:
+                        gt_semantics = occ_gt['semantics']
+                        mask_lidar = occ_gt['mask_lidar'].astype(bool)
+                        mask_camera = occ_gt['mask_camera'].astype(bool)
                 # occ_pred = occ_pred
                 self.occ_eval_metrics.add_batch(occ_pred, gt_semantics, mask_lidar, mask_camera)
 
-                occ_dict['voxel_semantics_preds'] = occ_pred
-                occ_dict['voxel_semantics'] = gt_semantics
-                occ_dict['mask_lidar'] = mask_lidar
-                occ_dict['mask_camera'] = mask_camera
-                occ_dict['path'] = info['occ_path']
-                save_occ.append(occ_dict)
+                if export_occ:
+                    save_occ.append(dict(
+                        voxel_semantics_preds=occ_pred,
+                        voxel_semantics=gt_semantics,
+                        mask_lidar=mask_lidar,
+                        mask_camera=mask_camera,
+                        path=info['occ_path'],
+                    ))
 
                 # if self.save_results == 'all' or  self.save_results == 'occ':
                 #     path = info['occ_path'].split('/')
@@ -909,7 +911,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
             dict_iou = self.occ_eval_metrics.count_miou()
             results_dict.update(dict_iou)
-            if self.save_results == 'all' or  self.save_results == 'occ':
+            if export_occ:
                 with open('occ_results.pkl', 'wb') as f:
                     pickle.dump(save_occ, f)
 
@@ -978,7 +980,6 @@ class NuScenes3DDetTrackDataset(Dataset):
         # )
         # lidar_origins = [batch[1] for i,batch in enumerate(data_loader)]
 
-        # results_dict.update(calc_rayiou(result_occ, gt_occ, lidar_origins))
 
         return results_dict
 
